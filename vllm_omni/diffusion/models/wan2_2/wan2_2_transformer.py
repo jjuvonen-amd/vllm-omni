@@ -972,11 +972,27 @@ class WanTransformer3DModel(nn.Module):
         if encoder_hidden_states_image is not None:
             encoder_hidden_states = torch.concat([encoder_hidden_states_image, encoder_hidden_states], dim=1)
 
-        # _shard_with_auto_pad always pads with torch.zeros, so no attention mask
-        # is needed: zero-padded tokens contribute negligibly to attention output.
-        # Passing a mask here forces the varlen attention path (unpad→kernel→repad),
-        # which carries additional overhead compared to a direct dense attention call.
         hidden_states_mask = None
+        ctx = get_forward_context()
+        parallel_config = ctx.omni_diffusion_config.parallel_config
+        if (
+            parallel_config is not None
+            and parallel_config.sequence_parallel_size > 1
+            and parallel_config.mask_sp_padding
+            and ctx.sp_original_seq_len is not None
+            and ctx.sp_padding_size > 0
+        ):
+            batch_size = hidden_states.shape[0]
+            padded_seq_len = ctx.sp_original_seq_len + ctx.sp_padding_size
+            hidden_states_mask = torch.ones(
+                batch_size,
+                padded_seq_len,
+                dtype=torch.bool,
+                device=hidden_states.device,
+            )
+            hidden_states_mask[:, ctx.sp_original_seq_len :] = False
+            if hidden_states_mask.all():
+                hidden_states_mask = None
 
         # Transformer blocks
         for block in self.blocks:
